@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SoloLedger Dashboard</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 16px; color: #1a1a1a; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 16px 0; }
+  .card { border: 1px solid #ddd; border-radius: 10px; padding: 14px; }
+  .card .label { font-size: 0.8em; color: #666; text-transform: uppercase; }
+  .card .val { font-size: 1.6em; font-weight: 700; margin-top: 4px; }
+  .profit { color: #0a7d2c; } .loss { color: #c00; }
+  .rent-ok { background: #e6f6ea; border-color: #0a7d2c; }
+  .rent-bad { background: #fdecec; border-color: #c00; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.95em; }
+  th, td { text-align: left; padding: 8px; border-bottom: 1px solid #eee; }
+  th { color: #666; font-weight: 600; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; margin: 16px 0; }
+  .row > * { flex: 1; min-width: 260px; }
+  fieldset { border: 1px solid #ddd; border-radius: 10px; padding: 14px; }
+  legend { font-weight: 600; padding: 0 6px; }
+  input, select, button { font-size: 1em; padding: 8px; margin: 4px 0; border-radius: 6px; border: 1px solid #ccc; }
+  button { background: #111; color: #fff; border: none; cursor: pointer; padding: 8px 16px; }
+  button:hover { background: #333; }
+  button.danger { background: #c00; }
+  h2 { margin-top: 32px; border-bottom: 2px solid #111; padding-bottom: 6px; }
+  .muted { color: #777; font-size: 0.9em; }
+</style>
+</head>
+<body>
+<h1>💰 SoloLedger</h1>
+<p class="muted">True-profit P&L for one-person SaaS — what you actually keep.</p>
+
+<div class="row">
+  <fieldset>
+    <legend>Month</legend>
+    <input type="month" id="month" value="">
+    <button onclick="refresh()">Load</button>
+    <button onclick="syncRevenue()">↻ Sync revenue</button>
+  </fieldset>
+  <fieldset>
+    <legend>Settings</legend>
+    Monthly nut: $<input type="number" id="nut" min="0" step="1" style="width:100px">
+    Cash on hand: $<input type="number" id="cash" min="0" step="1" style="width:100px">
+    <button onclick="saveSettings()">Save</button>
+  </fieldset>
+</div>
+
+<div class="cards" id="topcards"></div>
+<div id="rentbanner"></div>
+
+<h2>Profit &amp; loss</h2>
+<table id="catTable"><thead><tr><th>Category</th><th style="text-align:right">Amount</th></tr></thead><tbody></tbody></table>
+
+<h2>Per-product breakdown</h2>
+<table id="prodTable"><thead><tr><th>Product</th><th style="text-align:right">Revenue</th><th style="text-align:right">Costs</th><th style="text-align:right">Kept</th></tr></thead><tbody></tbody></table>
+
+<h2>Runway</h2>
+<div id="runway" class="card"></div>
+
+<h2>Add expense</h2>
+<fieldset>
+  <input type="date" id="exDate"> 
+  <select id="exCat">
+    <option>hosting</option><option>apis</option><option>contractors</option>
+    <option>tools</option><option>fees</option><option>other</option>
+  </select>
+  $<input type="number" id="exAmt" min="0.01" step="0.01" placeholder="0.00" style="width:100px">
+  <input type="text" id="exProd" placeholder="product (optional)" style="width:140px">
+  <input type="text" id="exNote" placeholder="note" style="width:180px">
+  <button onclick="addExpense()">Add</button>
+</fieldset>
+
+<h2>Add revenue (manual)</h2>
+<fieldset>
+  <input type="date" id="revDate">
+  $<input type="number" id="revAmt" min="0" step="0.01" placeholder="0.00" style="width:100px">
+  <input type="text" id="revProd" placeholder="product (optional)" style="width:140px">
+  <input type="text" id="revNote" placeholder="note" style="width:180px">
+  <button onclick="addRevenue()">Add</button>
+</fieldset>
+
+<h2>Expenses this month</h2>
+<table id="expTable"><thead><tr><th>Date</th><th>Category</th><th>Product</th><th>Note</th><th style="text-align:right">Amount</th><th></th></tr></thead><tbody></tbody></table>
+
+<h2>CSV import</h2>
+<fieldset>
+  <p class="muted">Columns: date, category, amount_cents (or amount in dollars), product, note</p>
+  <input type="file" id="csvFile" accept=".csv">
+  <button onclick="importCSV()">Import</button>
+  <div id="csvResult" class="muted"></div>
+</fieldset>
+
+<h2>Weekly digest preview</h2>
+<button onclick="previewDigest()">Preview snapshot email</button>
+<pre id="digestPreview" class="muted" style="white-space:pre-wrap"></pre>
+
+<script>
+const $ = id => document.getElementById(id);
+const money = c => (c < 0 ? '-' : '') + '$' + (Math.abs(c)/100).toFixed(2);
+const curMonth = () => $('month').value || new Date().toISOString().slice(0,7);
+
+async function api(path, opts={}) {
+  const r = await fetch(path, opts);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.detail || JSON.stringify(j));
+  return j;
+}
+
+async function refresh() {
+  const m = curMonth();
+  const {pnl} = await api('/api/pnl?month='+m);
+  const {rent} = await api('/api/rent?month='+m);
+  const {runway} = await api('/api/runway');
+  const {expenses} = await api('/api/expenses?month='+m);
+  const {settings} = await api('/api/settings');
+  $('nut').value = (settings.monthly_nut_cents/100);
+  $('cash').value = (settings.cash_on_hand_cents/100);
+
+  const pc = pnl.profit_cents >= 0 ? 'profit' : 'loss';
+  $('topcards').innerHTML = `
+    <div class="card"><div class="label">Revenue</div><div class="val">${money(pnl.revenue_cents)}</div></div>
+    <div class="card"><div class="label">Spent</div><div class="val">${money(pnl.expenses_cents)}</div></div>
+    <div class="card"><div class="label">Kept</div><div class="val ${pc}">${money(pnl.profit_cents)}</div></div>
+    <div class="card"><div class="label">Margin</div><div class="val">${pnl.margin_pct}%</div></div>`;
+
+  let banner = '';
+  if (rent.covered === true)
+    banner = `<div class="card rent-ok"><b>✅ RENT COVERED</b> — ${money(rent.surplus_cents)} left over after your $${(rent.monthly_nut_cents/100)} nut.</div>`;
+  else if (rent.covered === false)
+    banner = `<div class="card rent-bad"><b>❌ RENT NOT COVERED</b> — short by ${money(rent.shortfall_cents)} (nut is $${(rent.monthly_nut_cents/100)}).</div>`;
+  else
+    banner = `<div class="card"><b>Set your monthly nut</b> above to get the rent-covered verdict.</div>`;
+  $('rentbanner').innerHTML = banner;
+
+  $('catTable').querySelector('tbody').innerHTML =
+    Object.entries(pnl.by_category_cents).map(([c,a]) =>
+      `<tr><td>${c}</td><td style="text-align:right">${money(a)}</td></tr>`).join('');
+
+  $('prodTable').querySelector('tbody').innerHTML =
+    pnl.per_product.map(p => `<tr><td>${p.product}</td>
+      <td style="text-align:right">${money(p.revenue_cents)}</td>
+      <td style="text-align:right">${money(p.expenses_cents)}</td>
+      <td style="text-align:right" class="${p.profit_cents>=0?'profit':'loss'}"><b>${money(p.profit_cents)}</b></td></tr>`).join('');
+
+  $('runway').innerHTML = runway.status === 'profitable'
+    ? `<div class="label">Runway</div><div class="val profit">∞ — profitable</div><div class="muted">${runway.note}</div>`
+    : `<div class="label">Runway</div><div class="val loss">~${runway.runway_months} months</div><div class="muted">${runway.note}</div>`;
+
+  $('expTable').querySelector('tbody').innerHTML =
+    expenses.map(e => `<tr><td>${e.date}</td><td>${e.category}</td><td>${e.product}</td>
+      <td>${e.note||''}</td><td style="text-align:right">${money(e.amount_cents)}</td>
+      <td><button class="danger" onclick="delExpense(${e.id})">✕</button></td></tr>`).join('')
+    || '<tr><td colspan="6" class="muted">No expenses this month.</td></tr>';
+}
+
+async function addExpense() {
+  await api('/api/expenses', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({date: $('exDate').value || new Date().toISOString().slice(0,10),
+      category: $('exCat').value, amount_cents: Math.round(parseFloat($('exAmt').value)*100),
+      product: $('exProd').value || 'all', note: $('exNote').value})});
+  $('exAmt').value=''; $('exNote').value=''; refresh();
+}
+async function delExpense(id) {
+  await api('/api/expenses/'+id, {method:'DELETE'}); refresh();
+}
+async function addRevenue() {
+  await api('/api/revenue', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({date: $('revDate').value || new Date().toISOString().slice(0,10),
+      amount_cents: Math.round(parseFloat($('revAmt').value)*100),
+      product: $('revProd').value || 'all', note: $('revNote').value})});
+  $('revAmt').value=''; $('revNote').value=''; refresh();
+}
+async function saveSettings() {
+  await api('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({monthly_nut_cents: Math.round(parseFloat($('nut').value||0)*100),
+      cash_on_hand_cents: Math.round(parseFloat($('cash').value||0)*100})});
+  refresh();
+}
+async function syncRevenue() {
+  const j = await api('/api/sync?month='+curMonth(), {method:'POST'});
+  alert('Synced ('+j.sync.mode+'): '+money(j.sync.revenue_cents)+' revenue');
+  refresh();
+}
+async function importCSV() {
+  const f = $('csvFile').files[0]; if (!f) return alert('Pick a CSV file first.');
+  const fd = new FormData(); fd.append('file', f);
+  const r = await fetch('/api/expenses/csv', {method:'POST', body: fd});
+  const j = await r.json();
+  $('csvResult').textContent = `Imported ${j.added} rows.` + (j.errors.length ? ' Errors: '+j.errors.join('; ') : '');
+  refresh();
+}
+async function previewDigest() {
+  const j = await api('/api/digest?month='+curMonth());
+  $('digestPreview').textContent = j.subject + '\n\n' + j.text;
+}
+$('month').value = new Date().toISOString().slice(0,7);
+refresh();
+</script>
+</body>
+</html>

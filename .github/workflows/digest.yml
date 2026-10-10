@@ -1,0 +1,21 @@
+name: weekly-digest
+on:
+  schedule:
+    - cron: "0 9 * * 1"  # Mondays 09:00 UTC
+  workflow_dispatch:
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - run: python app/digest.py
+        working-directory: ${{ github.workspace }}
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          SOLOLEDGER_DIGEST_TO: ${{ secrets.SOLOLEDGER_DIGEST_TO }}
+          SOLOLEDGER_DIGEST_FROM: ${{ secrets.SOLOLEDGER_DIGEST_FROM }}
